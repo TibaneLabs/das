@@ -1,0 +1,18 @@
+[Unit]
+Description=DAS API (getAsset & co.) - loopback only, fronted by the authenticated relay
+After=network-online.target cockroach.service
+Wants=network-online.target
+StartLimitIntervalSec=1800
+StartLimitBurst=5
+
+[Service]
+User=solana
+Group=solana
+EnvironmentFile=/etc/das/api.env
+ExecStart=/usr/local/bin/das_api
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+[Unit]
+Description=DAS gRPC ingester (Yellowstone gRPC -> program_transformers -> DAS database)
+After=network-online.target agave-validator.service cockroach.service
+Wants=network-online.target
+# Without these, Restart=on-failure loops forever while `systemctl is-active` says active.
+StartLimitIntervalSec=1800
+StartLimitBurst=5
+
+[Service]
+User=solana
+Group=solana
+EnvironmentFile=/etc/das/grpc-ingester.env
+ExecStart=/usr/local/bin/das-grpc-ingester
+# Creates /var/lib/das-grpc-ingester owned by User: holds `cursor` and `gaps.jsonl`.
+StateDirectory=das-grpc-ingester
+Restart=on-failure
+RestartSec=10
+# SIGTERM drains in-flight writes (up to 60s) and saves the cursor.
+TimeoutStopSec=90
+LimitNOFILE=65536
+# The validator keeps the default weight of 100 and wins under contention.
+Nice=5
+CPUWeight=50
+IOWeight=50
+MemoryMax=16G
+
+[Install]
+WantedBy=multi-user.target
