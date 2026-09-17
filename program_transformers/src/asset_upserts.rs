@@ -6,7 +6,7 @@ use {
         },
     },
     sea_orm::{
-        sea_query::OnConflict, ConnectionTrait, DbBackend, DbErr, EntityTrait, QueryTrait, Set,
+        sea_query::{Expr, OnConflict}, ConnectionTrait, DbBackend, DbErr, EntityTrait, QueryTrait, Set,
         TransactionTrait,
     },
     serde_json::value::Value,
@@ -42,6 +42,13 @@ pub async fn upsert_assets_token_account_columns<T: ConnectionTrait + Transactio
                     asset::Column::Delegate,
                     asset::Column::SlotUpdatedTokenAccount,
                 ])
+                .value(
+                    asset::Column::SlotUpdated,
+                    // replaces upstream's update_slot_updated_trigger; see fork notes
+                    Expr::cust(
+                        "GREATEST(COALESCE(asset.slot_updated, 0), COALESCE(EXCLUDED.slot_updated_token_account, 0))",
+                    ),
+                )
                 .to_owned(),
         )
         .build(DbBackend::Postgres);
@@ -85,9 +92,15 @@ pub async fn upsert_assets_mint_account_columns<T: ConnectionTrait + Transaction
                     asset::Column::Supply,
                     asset::Column::SlotUpdatedMintAccount,
                     asset::Column::MintExtensions,
-                    asset::Column::SlotUpdated,
                     asset::Column::AssetData,
                 ])
+                .value(
+                    asset::Column::SlotUpdated,
+                    // replaces upstream's update_slot_updated_trigger; see fork notes
+                    Expr::cust(
+                        "GREATEST(COALESCE(asset.slot_updated, 0), COALESCE(EXCLUDED.slot_updated_mint_account, 0))",
+                    ),
+                )
                 .to_owned(),
         )
         .build(DbBackend::Postgres);
@@ -182,6 +195,13 @@ pub async fn upsert_assets_metadata_account_columns<T: ConnectionTrait + Transac
                     asset::Column::IsAgent,
                     asset::Column::AssetSigner,
                 ])
+                .value(
+                    asset::Column::SlotUpdated,
+                    // replaces upstream's update_slot_updated_trigger; see fork notes
+                    Expr::cust(
+                        "GREATEST(COALESCE(asset.slot_updated, 0), COALESCE(EXCLUDED.slot_updated_metadata_account, 0))",
+                    ),
+                )
                 .to_owned(),
         )
         .build(DbBackend::Postgres);

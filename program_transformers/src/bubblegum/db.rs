@@ -541,6 +541,13 @@ where
                     asset::Column::SlotUpdatedCnftTransaction,
                     asset::Column::BaseInfoSeq,
                 ])
+                .value(
+                    asset::Column::SlotUpdated,
+                    // replaces upstream's update_slot_updated_trigger; see asset_upserts.rs
+                    sea_orm::sea_query::Expr::cust(
+                        "GREATEST(COALESCE(asset.slot_updated, 0), COALESCE(EXCLUDED.slot_updated_cnft_transaction, 0))",
+                    ),
+                )
                 .to_owned(),
         )
         .build(DbBackend::Postgres);

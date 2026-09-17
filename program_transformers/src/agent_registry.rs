@@ -56,6 +56,11 @@ pub async fn handle_agent_registry_account<T: ConnectionTrait + TransactionTrait
     asset::Entity::update_many()
         .col_expr(asset::Column::AgentToken, Expr::value(agent_token_bytes))
         .col_expr(asset::Column::SlotUpdatedAgentRegistry, Expr::value(slot_i))
+        // replaces upstream's update_slot_updated_trigger; see asset_upserts.rs
+        .col_expr(
+            asset::Column::SlotUpdated,
+            Expr::cust(&format!("GREATEST(COALESCE(\"slot_updated\", 0), {slot_i})")),
+        )
         .filter(asset::Column::Id.eq(asset_id))
         .filter(asset::Column::Burnt.eq(false))
         .filter(asset::Column::SpecificationAssetClass.eq(SpecificationAssetClass::MplCoreAsset))
