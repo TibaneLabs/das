@@ -174,6 +174,10 @@ fn spawn_reporter(
                 meta_failed = d.metadata_failed,
                 meta_blocked = d.metadata_blocked,
                 meta_dropped = d.metadata_dropped,
+                meta_retried = d.metadata_retried,
+                meta_deferred = d.metadata_deferred,
+                meta_gave_up = d.metadata_gave_up,
+                meta_redriven = d.metadata_redriven,
                 "ingest"
             );
             if let Err(e) = cursor.save().await {

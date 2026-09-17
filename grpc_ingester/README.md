@@ -37,12 +37,29 @@ duplicates are no-ops.
 - **Backpressure.** At most `INGEST_CONCURRENCY` writes run at once; beyond that the
   ingester stops reading. If it falls far enough behind, the plugin disconnects it and it
   resumes from the cursor.
-- **Off-chain metadata** is downloaded by a bounded worker pool. Metadata URIs are
-  attacker-controlled on-chain data, so connections (including every redirect hop) may
-  only reach globally routable addresses and proxies are ignored. Without that, anyone
-  could mint an asset pointing at `http://127.0.0.1:8899` and make the node fetch from
-  its private RPC. When the queue is full, requests are dropped and counted rather than
-  slowing indexing.
+- **Off-chain metadata** is downloaded by a bounded worker pool, at most
+  `INGEST_METADATA_PER_HOST_CONCURRENCY` requests per host (subdomain gateways such as
+  `<cid>.ipfs.w3s.link` count as one host).
+  - HTTP 429 (or 503 with `Retry-After`) pauses the whole host, honouring `Retry-After`,
+    otherwise doubling from 5 s to 10 min. Jobs waiting on a paused host don't lose attempts.
+  - Other transient failures (5xx, timeouts, IPFS content not found yet) retry with
+    backoff up to `INGEST_METADATA_MAX_ATTEMPTS`.
+  - Permanent failures (404 from a web server, not JSON, too large) clear
+    `asset_data.reindex` so they stop being retried.
+  - `reindex = true` means "download owed". Every `INGEST_METADATA_REDRIVE_INTERVAL_SECS`
+    the ingester walks a partial index over those rows and queues what isn't already
+    pending - so downloads that ran out of attempts are picked up again later, e.g. after
+    switching gateways.
+  - **IPFS:** `ipfs://` URIs always go to `INGEST_IPFS_GATEWAY` (default `https://ipfs.io`).
+    With `INGEST_IPFS_REWRITE_PUBLIC_GATEWAYS=true`, content addressed through well-known
+    public gateways (pinata, dweb.link, w3s.link, ...) goes there too - turn this on once
+    the gateway is your own. The stored URI is never changed. Public gateways rate-limit
+    hard: ipfs.io answers a mainnet firehose with 429 and `Retry-After: 600`.
+  - Metadata URIs are attacker-controlled on-chain data, so outside the configured
+    gateway, connections (including every redirect hop) may only reach globally routable
+    addresses and proxies are ignored. Without that, anyone could mint an asset pointing
+    at `http://127.0.0.1:8899` and make the node fetch from its private RPC. The
+    configured gateway is trusted and may be on a private network.
 
 ## Running
 

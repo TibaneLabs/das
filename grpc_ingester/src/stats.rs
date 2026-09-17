@@ -51,6 +51,11 @@ counters!(
     metadata_failed,
     metadata_blocked,
     metadata_unsupported,
+    metadata_rewritten,
+    metadata_retried,
+    metadata_deferred,
+    metadata_gave_up,
+    metadata_redriven,
 );
 
 pub fn inc(counter: &AtomicU64) {
