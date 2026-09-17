@@ -122,7 +122,17 @@ async fn main() -> Result<(), DasApiError> {
     );
     env_logger::init();
     let config = load_config()?;
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
+    // TibaneLabs fork: upstream hardcodes 0.0.0.0. On a public-IP node that exposes an
+    // unauthenticated DAS API to the internet. Default to loopback and require an
+    // explicit APP_SERVER_HOST to widen it; an unparseable value falls back to
+    // loopback rather than opening up (fail closed).
+    let host: std::net::IpAddr = config
+        .server_host
+        .as_deref()
+        .unwrap_or("127.0.0.1")
+        .parse()
+        .unwrap_or_else(|_| std::net::IpAddr::from([127, 0, 0, 1]));
+    let addr = SocketAddr::new(host, config.server_port);
     let cors = CorsLayer::new()
         .allow_methods([Method::POST, Method::GET])
         .allow_origin(Any)

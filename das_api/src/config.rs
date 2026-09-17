@@ -10,6 +10,8 @@ pub struct Config {
     pub metrics_port: Option<u16>,
     pub metrics_host: Option<String>,
     pub server_port: u16,
+    /// TibaneLabs fork: bind address. Defaults to 127.0.0.1 when unset.
+    pub server_host: Option<String>,
     pub env: Option<String>,
 }
 
