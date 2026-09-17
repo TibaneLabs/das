@@ -230,6 +230,9 @@ async fn upsert_asset_data(
         base_info_seq: ActiveValue::Set(Some(0)),
         raw_name: ActiveValue::Set(Some(metadata.name.clone().into_bytes().to_vec())),
         raw_symbol: ActiveValue::Set(Some(metadata.symbol.clone().into_bytes().to_vec())),
+        // TibaneLabs fork: mark the download as owed, as the token metadata, MPL core
+        // and bubblegum writers do. Upstream left the column default (false) here.
+        reindex: ActiveValue::Set(Some(true)),
         ..Default::default()
     };
     let mut asset_data_query = asset_data::Entity::insert(asset_data_model)
@@ -243,6 +246,7 @@ async fn upsert_asset_data(
                     asset_data::Column::BaseInfoSeq,
                     asset_data::Column::RawName,
                     asset_data::Column::RawSymbol,
+                    asset_data::Column::Reindex,
                 ])
                 .to_owned(),
         )
