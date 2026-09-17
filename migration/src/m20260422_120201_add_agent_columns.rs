@@ -82,26 +82,9 @@ impl MigrationTrait for Migration {
         ))
         .await?;
 
-        // Update the trigger that computes asset.slot_updated from per-source
-        // slot columns to include the new agent registry source.
-        conn.execute(Statement::from_string(
-            DatabaseBackend::Postgres,
-            "CREATE OR REPLACE FUNCTION update_slot_updated() \
-             RETURNS TRIGGER AS $$ \
-             BEGIN \
-                NEW.slot_updated = GREATEST( \
-                    NEW.slot_updated_token_account, \
-                    NEW.slot_updated_mint_account, \
-                    NEW.slot_updated_metadata_account, \
-                    NEW.slot_updated_cnft_transaction, \
-                    NEW.slot_updated_agent_registry \
-                ); \
-                RETURN NEW; \
-             END; \
-             $$ language 'plpgsql';"
-                .to_string(),
-        ))
-        .await?;
+        // TibaneLabs fork: upstream redefines update_slot_updated() here to add the agent
+        // registry source. There is no trigger in this fork; agent_registry.rs folds
+        // slot_updated_agent_registry into asset.slot_updated itself.
 
         Ok(())
     }

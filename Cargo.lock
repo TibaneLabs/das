@@ -3829,6 +3829,7 @@ dependencies = [
  "async-std",
  "enum-iterator",
  "enum-iterator-derive",
+ "regex",
  "sea-orm-migration",
 ]
 

@@ -63,35 +63,10 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        let connection = manager.get_connection();
-        connection
-            .execute(Statement::from_string(
-                DatabaseBackend::Postgres,
-                "
-                CREATE OR REPLACE FUNCTION update_slot_updated()
-                RETURNS TRIGGER AS $$
-                BEGIN
-                   NEW.slot_updated = GREATEST(NEW.slot_updated_token_account, NEW.slot_updated_mint_account, NEW.slot_updated_metadata_account, NEW.slot_updated_cnft_transaction);
-                   RETURN NEW;
-                END;
-                $$ language 'plpgsql';
-                "
-                    .to_string(),
-            ))
-            .await?;
-
-        connection
-            .execute(Statement::from_string(
-                DatabaseBackend::Postgres,
-                "
-                CREATE TRIGGER update_slot_updated_trigger
-                BEFORE UPDATE ON asset
-                FOR EACH ROW
-                EXECUTE PROCEDURE update_slot_updated();
-                "
-                .to_string(),
-            ))
-            .await?;
+        // TibaneLabs fork: upstream creates update_slot_updated_trigger here. CockroachDB
+        // cannot express a BEFORE UPDATE trigger that mutates NEW, and we keep logic out
+        // of the database anyway: program_transformers maintains asset.slot_updated in
+        // each upsert instead.
 
         Ok(())
     }

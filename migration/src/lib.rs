@@ -1,5 +1,8 @@
 pub use sea_orm_migration::prelude::*;
 
+// TibaneLabs fork: CockroachDB compatibility helpers
+pub mod crdb;
+
 mod m20220101_000001_init;
 mod m20221020_052135_add_asset_hashes;
 mod m20221022_140350_add_creator_asset_unique_index;

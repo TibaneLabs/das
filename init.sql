@@ -64,32 +64,6 @@ CREATE INDEX backfill_items_tree_force_chk_idx on backfill_items (tree, force_ch
 CREATE INDEX backfill_items_tree_backfilled_idx on backfill_items (tree, backfilled);
 -- @@@@@@
 
-CREATE
-    or REPLACE FUNCTION notify_new_backfill_item()
-    RETURNS trigger
-    LANGUAGE 'plpgsql'
-as
-$BODY$
-declare
-begin
-    if
-        (tg_op = 'INSERT') then
-        perform pg_notify('backfill_item_added', 'hello');
-
-    end if;
-
-    return null;
-end
-$BODY$;
--- @@@@@@
-
-CREATE TRIGGER after_insert_item
-    AFTER INSERT
-    ON backfill_items
-    FOR EACH ROW
-EXECUTE PROCEDURE notify_new_backfill_item();
--- @@@@@@
-
 
 -- START NFT METADATA
 CREATE TYPE owner_type AS ENUM ('unknown', 'token', 'single');

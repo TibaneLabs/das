@@ -10,6 +10,12 @@ async-std = { workspace = true, features = ["attributes", "tokio1"] }
 enum-iterator = { workspace = true }
 enum-iterator-derive = { workspace = true }
 sea-orm-migration = { workspace = true, features = ["runtime-tokio-rustls", "sqlx-postgres"] }
+# sea-orm-cli 0.10.7 takes regex with default-features = false but needs "std". A full
+# workspace build gets std through feature unification (env_logger, prost-build), so only
+# `cargo build -p migration` on its own failed with E0277. Declaring it here fixes that.
+regex = { version = "1", features = ["std"] }
+# out-of-band DDL over the simple query protocol, see src/crdb.rs
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
 
 [lints]
 workspace = true

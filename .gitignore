@@ -22,3 +22,6 @@ test-ledger
 *.iml
 skaffold-state.json
 test-programs
+
+# fork working files
+*.bak
