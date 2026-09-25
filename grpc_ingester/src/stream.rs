@@ -18,7 +18,7 @@ use {
         time::{Duration, Instant},
     },
     tokio::sync::Semaphore,
-    tracing::{debug, error, info, warn},
+    tracing::{debug, info, warn},
     yellowstone_grpc_client::GeyserGrpcClient,
     yellowstone_grpc_proto::{
         prelude::{
@@ -86,7 +86,30 @@ pub struct Ingest {
     pub transformer: Arc<ProgramTransformer>,
     pub cursor: Arc<Cursor>,
     pub stats: Arc<Stats>,
-    pub writers: Arc<Semaphore>,
+    /// Bounds how many writes run at once.
+    writers: Arc<Semaphore>,
+    /// Striped locks: a key always maps to the same lock, so writes to one key are
+    /// serialised, while any worker can still pick up any update.
+    ///
+    /// Per-key *queues* were tried first and were worse: the hottest mints landed on one
+    /// queue, it filled, and the read loop blocked on it while the other workers idled -
+    /// zero writes for minutes. A lock only delays the contended key.
+    locks: Arc<Vec<tokio::sync::Mutex<()>>>,
+}
+
+const LOCK_STRIPES: usize = 4096;
+
+impl Ingest {
+    pub fn new(
+        config: Config,
+        transformer: Arc<ProgramTransformer>,
+        cursor: Arc<Cursor>,
+        stats: Arc<Stats>,
+    ) -> Self {
+        let writers = Arc::new(Semaphore::new(config.concurrency.max(1)));
+        let locks = Arc::new((0..LOCK_STRIPES).map(|_| tokio::sync::Mutex::new(())).collect());
+        Self { config, transformer, cursor, stats, writers, locks }
+    }
 }
 
 enum Ended {
@@ -173,12 +196,8 @@ impl Ingest {
                         let slot = update.slot;
                         match convert::account(update) {
                             Ok(info) => {
-                                let info = Arc::new(info);
-                                self.dispatch(slot, Kind::Account, move |t| {
-                                    let info = Arc::clone(&info);
-                                    async move { t.handle_account_update(&info).await }
-                                })
-                                .await;
+                                let key = partition_key(&info);
+                                self.dispatch(slot, &key, Update::Account(Arc::new(info))).await;
                             }
                             Err(e) => {
                                 inc(&self.stats.accounts_failed);
@@ -190,12 +209,10 @@ impl Ingest {
                         let slot = update.slot;
                         match convert::transaction(update) {
                             Ok(info) => {
-                                let info = Arc::new(info);
-                                self.dispatch(slot, Kind::Transaction, move |t| {
-                                    let info = Arc::clone(&info);
-                                    async move { t.handle_transaction(&info).await }
-                                })
-                                .await;
+                                // Bubblegum transactions are low volume; the signature
+                                // spreads them while keeping one signature on one worker.
+                                let key = info.signature.as_ref().to_vec();
+                                self.dispatch(slot, &key, Update::Transaction(Arc::new(info))).await;
                             }
                             Err(e) => {
                                 inc(&self.stats.txs_failed);
@@ -227,72 +244,110 @@ impl Ingest {
         }
     }
 
-    /// Write one update with bounded concurrency. Waiting for a permit stops reading
-    /// the stream, which is the backpressure: if we fall far enough behind the plugin
-    /// disconnects us and we resume from the cursor.
-    async fn dispatch<F, Fut>(&self, slot: u64, kind: Kind, write: F)
-    where
-        F: Fn(Arc<ProgramTransformer>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<(), ProgramTransformerError>> + Send,
-    {
+    /// Queue one write. Waiting for a permit is the backpressure: if we fall far enough
+    /// behind, the plugin disconnects us and we resume from the cursor.
+    async fn dispatch(&self, slot: u64, key: &[u8], update: Update) {
         let permit = Arc::clone(&self.writers)
             .acquire_owned()
             .await
             .expect("writer semaphore is never closed");
         self.cursor.begin(slot);
-        let transformer = Arc::clone(&self.transformer);
-        let cursor = Arc::clone(&self.cursor);
-        let stats = Arc::clone(&self.stats);
+        let stripe = partition(key, LOCK_STRIPES);
+        let (transformer, cursor, stats, locks) = (
+            Arc::clone(&self.transformer),
+            Arc::clone(&self.cursor),
+            Arc::clone(&self.stats),
+            Arc::clone(&self.locks),
+        );
         let max_attempts = self.config.max_write_attempts;
-
         tokio::spawn(async move {
-            let started = Instant::now();
-            let mut attempt = 0;
-            let outcome = loop {
-                match write(Arc::clone(&transformer)).await {
-                    Ok(()) => break Ok(()),
-                    Err(ProgramTransformerError::NotImplemented) => break Err(None),
-                    Err(e) if retry::is_retryable(&e.to_string()) => {
-                        attempt += 1;
-                        if attempt >= max_attempts {
-                            break Err(Some((e, true)));
-                        }
-                        inc(&stats.write_retries);
-                        tokio::time::sleep(retry::backoff(attempt)).await;
-                    }
-                    Err(e) => break Err(Some((e, false))),
-                }
-            };
-            stats.record_write(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
-
-            let (ok, skipped, failed) = match kind {
-                Kind::Account => (&stats.accounts_ok, &stats.accounts_skipped, &stats.accounts_failed),
-                Kind::Transaction => (&stats.txs_ok, &stats.txs_skipped, &stats.txs_failed),
-            };
-            match outcome {
-                Ok(()) => inc(ok),
-                Err(None) => inc(skipped),
-                Err(Some((e, true))) => {
-                    // The database said "try again" every time. The data is fine, so
-                    // moving the cursor past it would lose it for good. Hold the
-                    // cursor here: a restart replays from this slot.
-                    inc(failed);
-                    inc(&stats.writes_held);
-                    error!(slot, ?kind, error = %e, attempts = max_attempts, "write kept failing; holding cursor at this slot");
-                    drop(permit);
-                    return;
-                }
-                Err(Some((e, false))) => {
-                    // Rejected on its content (unparseable account and similar).
-                    // Retrying cannot help; same handling as upstream: log and move on.
-                    inc(failed);
-                    debug!(slot, ?kind, error = %e, "update rejected");
-                }
-            }
-            cursor.end(slot);
+            let _ordered = locks[stripe].lock().await;
+            write(&transformer, &cursor, &stats, max_attempts, slot, &update).await;
             drop(permit);
         });
     }
+}
+
+/// Write one update, retrying as long as the database says the failure is retryable.
+async fn write(
+    transformer: &ProgramTransformer,
+    cursor: &Cursor,
+    stats: &Stats,
+    max_attempts: u32,
+    slot: u64,
+    update: &Update,
+) {
+    let started = Instant::now();
+    let kind = match update {
+        Update::Account(_) => Kind::Account,
+        Update::Transaction(_) => Kind::Transaction,
+    };
+    let mut attempt = 0;
+    let outcome = loop {
+        let result = match update {
+            Update::Account(info) => transformer.handle_account_update(info).await,
+            Update::Transaction(info) => transformer.handle_transaction(info).await,
+        };
+        match result {
+            Ok(()) => break Ok(()),
+            Err(ProgramTransformerError::NotImplemented) => break Err(None),
+            // Retryable means retry. The data is fine and the database is asking us to try
+            // again (SERIALIZABLE aborts, dropped connections). Giving up used to hold the
+            // cursor at this slot forever, which made a gap inevitable.
+            Err(e) if retry::is_retryable(&e.to_string()) => {
+                attempt += 1;
+                if attempt == max_attempts {
+                    inc(&stats.writes_held);
+                    warn!(slot, ?kind, error = %e, attempts = attempt, "write still failing; retrying");
+                }
+                inc(&stats.write_retries);
+                tokio::time::sleep(retry::backoff(attempt)).await;
+            }
+            Err(e) => break Err(Some(e)),
+        }
+    };
+    stats.record_write(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+
+    let (ok, skipped, failed) = match kind {
+        Kind::Account => (&stats.accounts_ok, &stats.accounts_skipped, &stats.accounts_failed),
+        Kind::Transaction => (&stats.txs_ok, &stats.txs_skipped, &stats.txs_failed),
+    };
+    match outcome {
+        Ok(()) => inc(ok),
+        Err(None) => inc(skipped),
+        // Rejected on its content (unparseable account and similar); retrying cannot help.
+        Err(Some(e)) => {
+            inc(failed);
+            debug!(slot, ?kind, error = %e, "update rejected");
+        }
+    }
+    cursor.end(slot);
+}
+
+/// What to serialise an account update on: its own address.
+///
+/// Keying token accounts by their *mint* was tried, to stop token accounts of one mint
+/// colliding on that mint's `asset` row. It backfired: the busiest mints then serialised
+/// on a single stripe while holding write permits, so the permits filled with waiters for
+/// one mint and throughput collapsed. Cross-key conflicts are cheaper to absorb through
+/// retries than to prevent by serialising a hot key.
+fn partition_key(info: &program_transformers::AccountInfo) -> [u8; 32] {
+    info.pubkey.to_bytes()
+}
+
+/// Which worker owns a key. FNV-1a: no dependency, and good enough to spread pubkeys.
+fn partition(key: &[u8], workers: usize) -> usize {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (hash % workers as u64) as usize
+}
+
+pub enum Update {
+    Account(Arc<program_transformers::AccountInfo>),
+    Transaction(Arc<program_transformers::TransactionInfo>),
 }
 
 #[derive(Debug, Clone, Copy)]

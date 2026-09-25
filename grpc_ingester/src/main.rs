@@ -15,7 +15,7 @@ use {
     anyhow::Context,
     clap::Parser,
     std::{path::PathBuf, sync::Arc, time::Duration},
-    tokio::{signal::unix::SignalKind, sync::Semaphore},
+    tokio::signal::unix::SignalKind,
     tracing::{error, info},
 };
 
@@ -33,7 +33,9 @@ pub struct Config {
     #[arg(long, env = "INGEST_DATABASE_URL")]
     pub database_url: String,
 
-    #[arg(long, env = "INGEST_DATABASE_MAX_CONNECTIONS", default_value_t = 64)]
+    /// Must exceed `--concurrency` plus the metadata workers, or writes queue waiting for
+    /// a connection instead of for the database.
+    #[arg(long, env = "INGEST_DATABASE_MAX_CONNECTIONS", default_value_t = 160)]
     pub database_max_connections: u32,
 
     /// Holds the resume cursor and the gap log.
@@ -89,25 +91,15 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let transformer = Arc::new(program_transformers::ProgramTransformer::new(pool, notifier));
     let cursor = Arc::new(cursor::Cursor::load(&config.state_dir, config.start_slot).await?);
-    let writers = Arc::new(Semaphore::new(config.concurrency));
-
     spawn_reporter(
         Duration::from_secs(config.stats_interval_secs.max(1)),
         Arc::clone(&stats),
         Arc::clone(&cursor),
-        Arc::clone(&writers),
-        config.concurrency,
     );
 
-    stream::Ingest {
-        config,
-        transformer,
-        cursor,
-        stats,
-        writers,
-    }
-    .run(shutdown_signal())
-    .await
+    stream::Ingest::new(config, transformer, cursor, stats)
+        .run(shutdown_signal())
+        .await
 }
 
 async fn shutdown_signal() {
@@ -129,8 +121,6 @@ fn spawn_reporter(
     interval: Duration,
     stats: Arc<stats::Stats>,
     cursor: Arc<cursor::Cursor>,
-    writers: Arc<Semaphore>,
-    concurrency: usize,
 ) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
@@ -163,7 +153,6 @@ fn spawn_reporter(
                 held = d.writes_held,
                 avg_write_ms = %format!("{avg_write_ms:.1}"),
                 max_write_ms = %format!("{max_write_ms:.1}"),
-                in_flight = concurrency.saturating_sub(writers.available_permits()),
                 slots_in_flight = position.slots_in_flight,
                 cursor = ?position.watermark,
                 finalized = ?position.highest_finalized,

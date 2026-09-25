@@ -46,7 +46,7 @@ pub struct MetadataArgs {
     pub metadata_disable: bool,
 
     /// Concurrent downloads, across all hosts.
-    #[arg(long, env = "INGEST_METADATA_CONCURRENCY", default_value_t = 32)]
+    #[arg(long, env = "INGEST_METADATA_CONCURRENCY", default_value_t = 16)]
     pub metadata_concurrency: usize,
 
     /// Concurrent downloads from any single host.
