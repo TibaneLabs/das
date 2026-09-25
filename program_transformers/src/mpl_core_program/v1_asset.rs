@@ -30,9 +30,9 @@ use {
     sea_orm::{
         entity::{ActiveValue, ColumnTrait, EntityTrait},
         prelude::*,
-        query::{JsonValue, QueryFilter, QuerySelect, QueryTrait},
-        sea_query::{query::OnConflict, Expr},
-        ConnectionTrait, CursorTrait, DbBackend, FromQueryResult, TransactionTrait,
+        query::{JsonValue, QueryFilter, QueryTrait},
+        sea_query::query::OnConflict,
+        ConnectionTrait, DbBackend, Statement, TransactionTrait,
     },
     serde_json::{value::Value, Map},
     solana_sdk::pubkey::Pubkey,
@@ -163,14 +163,31 @@ pub async fn save_v1_asset<T: ConnectionTrait + TransactionTrait>(
         )
         .build(DbBackend::Postgres);
     query.sql = format!(
-        "{} WHERE excluded.slot_updated > asset_authority.slot_updated",
+        // TibaneLabs fork: only write when the authority actually changed. Rewriting an
+        // unchanged row still creates a write intent, and under CockroachDB's
+        // SERIALIZABLE isolation every concurrent read or write of that row queues behind
+        // it until the (long) enclosing transaction commits. Measured on a mainnet node:
+        // 27k of these per hour, this SELECT averaging 10.9s and the whole connection
+        // pool sitting in open transactions while the ingester fell behind.
+        "{} WHERE excluded.slot_updated > asset_authority.slot_updated \
+         AND asset_authority.authority IS DISTINCT FROM excluded.authority",
         query.sql
     );
-    txn.execute(query)
+    let authority_changed = txn
+        .execute(query)
         .await
-        .map_err(|db_err| ProgramTransformerError::AssetIndexError(db_err.to_string()))?;
+        .map_err(|db_err| ProgramTransformerError::AssetIndexError(db_err.to_string()))?
+        .rows_affected()
+        > 0;
 
-    if matches!(account_data, MplCoreAccountData::Collection(_)) {
+    // TibaneLabs fork: propagating a collection's authority to its members touches every
+    // asset in the collection, so only do it when the collection's own authority row
+    // actually changed (the upsert above reports that). Upstream ran the walk on every
+    // collection update, which stalled the whole ingest pipeline in production.
+    //
+    // Trade-off: if a previous propagation was interrupted, members stay stale until the
+    // next authority change rather than being repaired by the next collection update.
+    if authority_changed && matches!(account_data, MplCoreAccountData::Collection(_)) {
         update_group_asset_authorities(conn, id_vec.clone(), update_authority.clone(), slot_i)
             .await?;
     }
@@ -760,83 +777,38 @@ fn convert_keys_to_snake_case(plugins_json: &mut Value) {
     }
 }
 
-/// Struct used when querying only for asset IDs.
-#[derive(Debug, FromQueryResult, Clone)]
-struct Id {
-    id: Vec<u8>,
-}
-
-/// Updates the `asset_authority` for all assets that are part of a collection in a batch,
-/// but only for assets where `compressed = false`.
+/// Propagates a collection's authority to its non-compressed members.
+///
+/// TibaneLabs fork: one conditional UPDATE instead of upstream's paged walk.
+///
+/// Upstream read the collection's members 1,000 at a time and issued an UPDATE per page,
+/// which is O(collection size) round-trips on every call. It also grew its own filter each
+/// iteration (`query = query.after(..)` appends rather than replaces), so successive pages
+/// got slower - visible in the logs as
+/// `WHERE ... asset_id > $3 AND asset_id > $4 AND asset_id > $5`.
+///
+/// This touches only rows whose authority actually differs, so it usually writes nothing.
 async fn update_group_asset_authorities<T: ConnectionTrait + TransactionTrait>(
     conn: &T,
     group_value: Vec<u8>,
     authority: Vec<u8>,
     slot: i64,
 ) -> ProgramTransformerResult<()> {
-    let mut after = None;
-
-    let group_key = "collection".to_string();
     let group_value = bs58::encode(group_value).into_string();
-
-    let mut query = asset_grouping::Entity::find()
-        .filter(asset_grouping::Column::GroupKey.eq(group_key))
-        .filter(asset_grouping::Column::GroupValue.eq(group_value))
-        .cursor_by(asset_grouping::Column::AssetId);
-    let mut query = query.first(1_000);
-
-    loop {
-        if let Some(after) = after.clone() {
-            query = query.after(after);
-        }
-
-        let entries = query.all(conn).await?;
-
-        if entries.is_empty() {
-            break;
-        }
-
-        let asset_ids = entries
-            .clone()
-            .into_iter()
-            .map(|entry| entry.asset_id)
-            .collect::<Vec<_>>();
-
-        // Only include assets where compressed = false
-        let filtered_assets = asset::Entity::find()
-            .select_only()
-            .column(asset::Column::Id)
-            .filter(asset::Column::Id.is_in(asset_ids))
-            .filter(asset::Column::Compressed.eq(false))
-            .into_model::<Id>()
-            .all(conn)
-            .await?;
-
-        let filtered_asset_ids = filtered_assets
-            .into_iter()
-            .map(|entry| entry.id)
-            .collect::<Vec<_>>();
-
-        if !filtered_asset_ids.is_empty() {
-            asset_authority::Entity::update_many()
-                .col_expr(
-                    asset_authority::Column::Authority,
-                    Expr::value(authority.clone()),
-                )
-                .col_expr(asset_authority::Column::SlotUpdated, Expr::value(slot))
-                .filter(asset_authority::Column::AssetId.is_in(filtered_asset_ids))
-                .filter(asset_authority::Column::Authority.ne(authority.clone()))
-                .filter(Expr::cust_with_values(
-                    "asset_authority.slot_updated < $1",
-                    vec![slot],
-                ))
-                .exec(conn)
-                .await
-                .map_err(|db_err| ProgramTransformerError::AssetIndexError(db_err.to_string()))?;
-        }
-
-        after = entries.last().map(|entry| entry.asset_id.clone());
-    }
-
+    conn.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE asset_authority SET authority = $1, slot_updated = $2 \
+         WHERE asset_authority.authority IS DISTINCT FROM $1 \
+           AND asset_authority.slot_updated < $2 \
+           AND asset_authority.asset_id IN ( \
+                 SELECT g.asset_id FROM asset_grouping g \
+                 JOIN asset a ON a.id = g.asset_id \
+                 WHERE g.group_key = 'collection' AND g.group_value = $3 \
+                   AND a.compressed = false)",
+        [authority.into(), slot.into(), group_value.into()],
+    ))
+    .await
+    .map_err(|db_err| ProgramTransformerError::AssetIndexError(db_err.to_string()))?;
     Ok(())
 }
+

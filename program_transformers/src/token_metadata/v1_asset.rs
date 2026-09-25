@@ -327,7 +327,14 @@ pub async fn save_v1_asset<T: ConnectionTrait + TransactionTrait>(
         )
         .build(DbBackend::Postgres);
     query.sql = format!(
-        "{} WHERE excluded.slot_updated > asset_authority.slot_updated",
+        // TibaneLabs fork: only write when the authority actually changed. Rewriting an
+        // unchanged row still creates a write intent, and under CockroachDB's
+        // SERIALIZABLE isolation every concurrent read or write of that row queues behind
+        // it until the (long) enclosing transaction commits. Measured on a mainnet node:
+        // 27k of these per hour, this SELECT averaging 10.9s and the whole connection
+        // pool sitting in open transactions while the ingester fell behind.
+        "{} WHERE excluded.slot_updated > asset_authority.slot_updated \
+         AND asset_authority.authority IS DISTINCT FROM excluded.authority",
         query.sql
     );
     txn.execute(query)

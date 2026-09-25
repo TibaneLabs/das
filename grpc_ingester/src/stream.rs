@@ -331,7 +331,7 @@ async fn write(
 /// on a single stripe while holding write permits, so the permits filled with waiters for
 /// one mint and throughput collapsed. Cross-key conflicts are cheaper to absorb through
 /// retries than to prevent by serialising a hot key.
-fn partition_key(info: &program_transformers::AccountInfo) -> [u8; 32] {
+const fn partition_key(info: &program_transformers::AccountInfo) -> [u8; 32] {
     info.pubkey.to_bytes()
 }
 
