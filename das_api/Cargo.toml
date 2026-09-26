@@ -26,6 +26,7 @@ open-rpc-derive = { workspace = true }
 open-rpc-schema = { workspace = true }
 schemars = { workspace = true }
 schemars_derive = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
 sea-orm = { workspace = true, features = ["macros", "runtime-tokio-rustls", "sqlx-postgres"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

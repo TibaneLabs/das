@@ -13,6 +13,14 @@ pub struct Config {
     /// TibaneLabs fork: bind address. Defaults to 127.0.0.1 when unset.
     pub server_host: Option<String>,
     pub env: Option<String>,
+
+    /// TibaneLabs fork: upstream DAS endpoint used for assets this node has not indexed.
+    /// Carries an API key, so it is never logged. Unset disables the fallback.
+    pub fallback_das_url: Option<String>,
+    /// Seconds before an upstream request is abandoned (default 10).
+    pub fallback_das_timeout_secs: Option<u64>,
+    /// Seconds a cached upstream answer stays usable (default 3600).
+    pub fallback_das_cache_ttl_secs: Option<u64>,
 }
 
 pub fn load_config() -> Result<Config, DasApiError> {

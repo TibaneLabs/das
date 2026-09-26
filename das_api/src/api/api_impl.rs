@@ -31,10 +31,15 @@ use {
     digital_asset_types::rpc::{response::AssetList, Asset, AssetProof},
     sea_orm::{DatabaseConnection, DbErr, SqlxPostgresConnector},
     sqlx::postgres::PgPoolOptions,
+    std::{sync::Arc, time::Duration},
+    tracing::info,
 };
 
 pub struct DasApi {
     db_connection: DatabaseConnection,
+    /// TibaneLabs fork: serves assets this node has not indexed from an upstream DAS
+    /// provider. `None` disables it.
+    fallback: Option<Arc<crate::fallback::Fallback>>,
 }
 
 impl DasApi {
@@ -45,9 +50,38 @@ impl DasApi {
             .await?;
 
         let conn = SqlxPostgresConnector::from_sqlx_postgres_pool(pool);
+
+        let fallback = match config.fallback_das_url.clone() {
+            Some(url) => {
+                let timeout = Duration::from_secs(config.fallback_das_timeout_secs.unwrap_or(10));
+                let ttl = Duration::from_secs(config.fallback_das_cache_ttl_secs.unwrap_or(3600));
+                // The URL carries an API key: log that it is on, never the value.
+                info!(timeout_secs = timeout.as_secs(), cache_ttl_secs = ttl.as_secs(), "upstream DAS fallback enabled");
+                Some(Arc::new(
+                    crate::fallback::Fallback::new(url, timeout, ttl)
+                        .map_err(|e| DasApiError::ConfigurationError(e.to_string()))?,
+                ))
+            }
+            None => None,
+        };
+
         Ok(DasApi {
             db_connection: conn,
+            fallback,
         })
+    }
+
+    /// Ask upstream when the local index has nothing. Local data always wins.
+    async fn from_upstream<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        cache_key: &str,
+        params: serde_json::Value,
+    ) -> Option<T> {
+        self.fallback
+            .as_ref()?
+            .get(&self.db_connection, method, cache_key, params)
+            .await
     }
 
     fn get_cursor(&self, cursor: &Option<String>) -> Result<Cursor, DasApiError> {
@@ -167,15 +201,32 @@ impl ApiContract for DasApi {
     ) -> Result<AssetProof, DasApiError> {
         let id = validate_pubkey(payload.id.clone())?;
         let id_bytes = id.to_bytes().to_vec();
-        get_proof_for_asset(&self.db_connection, id_bytes)
+        let local = get_proof_for_asset(&self.db_connection, id_bytes)
             .await
             .and_then(|p| {
                 if p.proof.is_empty() {
                     return Err(not_found(&payload.id));
                 }
                 Ok(p)
-            })
-            .map_err(Into::into)
+            });
+        match local {
+            Ok(proof) => Ok(proof),
+            Err(e) => {
+                // A proof built from a tree we only partly indexed would be wrong, so an
+                // upstream answer is strictly better than ours here.
+                match self
+                    .from_upstream::<AssetProof>(
+                        "getAssetProof",
+                        &payload.id,
+                        serde_json::json!({ "id": payload.id }),
+                    )
+                    .await
+                {
+                    Some(proof) => Ok(proof),
+                    None => Err(e.into()),
+                }
+            }
+        }
     }
 
     async fn get_asset_proofs(
@@ -207,9 +258,19 @@ impl ApiContract for DasApi {
         let GetAsset { id, options } = payload;
         let id_bytes = validate_pubkey(id.clone())?.to_bytes().to_vec();
         let options = options.unwrap_or_default();
-        get_asset(&self.db_connection, id_bytes, &options)
-            .await
-            .map_err(Into::into)
+        match get_asset(&self.db_connection, id_bytes, &options).await {
+            Ok(asset) => Ok(asset),
+            Err(e) => {
+                // Not indexed here (ingestion started mid-chain and has gaps): ask upstream.
+                match self
+                    .from_upstream::<Asset>("getAsset", &id, serde_json::json!({ "id": id }))
+                    .await
+                {
+                    Some(asset) => Ok(asset),
+                    None => Err(e.into()),
+                }
+            }
+        }
     }
 
     async fn get_assets(

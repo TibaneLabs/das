@@ -1,3 +1,4 @@
+mod fallback;
 pub mod api;
 mod builder;
 mod config;
