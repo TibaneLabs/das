@@ -14,4 +14,8 @@ pub struct Options {
     pub show_inscription: bool,
     #[serde(default)]
     pub show_fungible: bool,
+    /// TibaneLabs fork: Helius extension, not in the DAS spec. When set, list responses
+    /// carry the owner's SOL balance in `nativeBalance`.
+    #[serde(default)]
+    pub show_native_balance: bool,
 }

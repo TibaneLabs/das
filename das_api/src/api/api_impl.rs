@@ -40,6 +40,8 @@ pub struct DasApi {
     /// TibaneLabs fork: serves assets this node has not indexed from an upstream DAS
     /// provider. `None` disables it.
     fallback: Option<Arc<crate::fallback::Fallback>>,
+    /// TibaneLabs fork: fills `nativeBalance` when a caller asks for it.
+    native_balance: Arc<crate::native_balance::NativeBalanceFetcher>,
 }
 
 impl DasApi {
@@ -65,9 +67,19 @@ impl DasApi {
             None => None,
         };
 
+        let rpc_url = config
+            .rpc_url
+            .clone()
+            .unwrap_or_else(|| "http://127.0.0.1:8899".to_owned());
+        let native_balance = Arc::new(
+            crate::native_balance::NativeBalanceFetcher::new(rpc_url, Duration::from_secs(10))
+                .map_err(|e| DasApiError::ConfigurationError(e.to_string()))?,
+        );
+
         Ok(DasApi {
             db_connection: conn,
             fallback,
+            native_balance,
         })
     }
 
@@ -322,15 +334,20 @@ impl ApiContract for DasApi {
         let options = options.unwrap_or_default();
         let page_options =
             self.validate_pagination(limit, page, &before, &after, &cursor, Some(sort_by))?;
-        get_assets_by_owner(
+        let mut list = get_assets_by_owner(
             &self.db_connection,
             owner_address_bytes,
             sort_by,
             &page_options,
             &options,
         )
-        .await
-        .map_err(Into::into)
+        .await?;
+        // Helius extension: a balance lookup must never fail the asset list, so a failure
+        // just leaves the field out.
+        if options.show_native_balance {
+            list.native_balance = self.native_balance.lamports(&owner_address.to_string()).await;
+        }
+        Ok(list)
     }
 
     async fn get_assets_by_group(
@@ -534,9 +551,17 @@ impl ApiContract for DasApi {
         let page_options =
             self.validate_pagination(limit, page, &before, &after, &cursor, Some(sort_by))?;
         // Execute query
-        search_assets(&self.db_connection, saq, sort_by, &page_options, &options)
-            .await
-            .map_err(Into::into)
+        let owner_for_balance = saq.owner_address.clone();
+        let mut list =
+            search_assets(&self.db_connection, saq, sort_by, &page_options, &options).await?;
+        // Helius extension; only meaningful when the search was scoped to one owner.
+        if options.show_native_balance {
+            if let Some(owner) = owner_for_balance {
+                let owner = bs58::encode(owner).into_string();
+                list.native_balance = self.native_balance.lamports(&owner).await;
+            }
+        }
+        Ok(list)
     }
 
     async fn get_asset_signatures(

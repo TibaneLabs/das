@@ -21,6 +21,9 @@ pub struct Config {
     pub fallback_das_timeout_secs: Option<u64>,
     /// Seconds a cached upstream answer stays usable (default 3600).
     pub fallback_das_cache_ttl_secs: Option<u64>,
+
+    /// TibaneLabs fork: RPC used for `showNativeBalance` (default http://127.0.0.1:8899).
+    pub rpc_url: Option<String>,
 }
 
 pub fn load_config() -> Result<Config, DasApiError> {

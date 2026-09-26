@@ -34,6 +34,11 @@ pub struct AssetList {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     pub items: Vec<Asset>,
+    /// TibaneLabs fork: present only when `showNativeBalance` was requested.
+    /// `AssetList` has no `rename_all`, so the camelCase name is explicit here - clients
+    /// written against Helius look for `nativeBalance`.
+    #[serde(rename = "nativeBalance", skip_serializing_if = "Option::is_none")]
+    pub native_balance: Option<NativeBalance>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<DasError>,
 }
@@ -94,4 +99,16 @@ pub struct NftEditions {
     pub after: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+}
+
+/// The owner's SOL balance, as Helius returns it alongside a list of assets.
+/// `price_per_sol`/`total_price` need a price feed we do not run, so they are omitted.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeBalance {
+    pub lamports: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_per_sol: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_price: Option<f64>,
 }

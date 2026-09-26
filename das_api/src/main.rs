@@ -1,3 +1,4 @@
+mod native_balance;
 mod fallback;
 pub mod api;
 mod builder;

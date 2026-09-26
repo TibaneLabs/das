@@ -86,6 +86,7 @@ pub fn build_asset_response(
         items,
         errors,
         cursor,
+        native_balance: None,
     }
 }
 
